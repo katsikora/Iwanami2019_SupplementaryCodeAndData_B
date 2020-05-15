@@ -1,0 +1,478 @@
+---
+title: "Structural basis of epigenetic protection of mouse lymphoid progenitor cells by Dnmt1"
+author: "Norimasa Iwanami, Kohei Takeshita, Divine-Fondzenyuy Lawir, Isao Suetake, Shoji Tajima, Katarzyna Sikora, Ines Trancoso, Connor O'Meara, Iliana Siamishi, Thomas Clapes, Eirini Trompouki, Yousuke Takahama, Makoto Furutani-Seiki, Hisato Kondoh, Yasushige Yonezawa, Michael Schorpp and Thomas Boehm"
+
+output: 
+    html_document:
+      fig_caption: yes
+      toc: true
+      toc_float: true
+      toc_depth: 4
+fontsize: 14pt
+fig_caption: true
+geometry: margin=0.6in 
+---
+
+```{r setup, include=FALSE}
+start_time <- Sys.time()
+knitr::opts_chunk$set(echo = TRUE)
+library(knitr)
+opts_chunk$set(tidy.opts=list(width.cutoff=75),tidy=TRUE)
+opts_chunk$set(width=75)
+```
+
+## **Summary**
+
+This document provides the R code and accompanying explanations to reproduce Figures 1 B-C, 7 A-C,  as well as Supplementary Figure 6 from the manuscript with working title "Structural basis of epigenetic protection of mouse lymphoid progenitor cells by Dnmt1" by Iwanami et al..  
+The analysis starts with partially processed methylation and gene expression analysis results and walks the reader through the data processing underlying the manuscript figures.  A copy of this document will be deposited on GitHub under https://github.com/katsikora/Iwanami2019_SupplementaryCodeAndData_B upon publication. The code is formatted in a way to facilitate understanding and interpretation by a lay R user.
+This code is authored by Katarzyna Sikora.
+   
+<hr color="blue" >
+<h4 style="color:blue">Input data</h4>   
+<hr color="blue" >
+
+Input data can be obtained under:
+
+*  Figure 1B: "https://owncloud.gwdg.de/index.php/s/lvecKi4NY4DlUTX/download" (zebrafish single CpG values intersected with target intervals from Potok et al. 2013, RData format); "https://owncloud.gwdg.de/index.php/s/vaFsvbCidrST2kO/download" (Potok et al. 2013 intervals lifted over to GRCz10 zebrafish genome, bed format),
+*  Figure 1C: "https://owncloud.gwdg.de/index.php/s/uqSNUHxH1PIwJZn/download" (medaka amplicon single CpG values extracted for the target intervals from Potok et al. 2013., RData format);  "https://owncloud.gwdg.de/index.php/s/IBcLPYo46QiZGzm/download" (Potok et al. 2013 intervals lifted over to MEDAKA1 genome and corrected for primer placement, bed format),
+*  Figure 7A: "https://owncloud.gwdg.de/index.php/s/rablpH3ijlfw90d/download" (mouse HSC CpG methylation values aggregated over DMRs, RData format),
+*  Figure 7B: "https://owncloud.gwdg.de/index.php/s/n4oOMZ5Xep6C6Vv/download" (mouse HSC differential gene expression results, tsv format); "https://owncloud.gwdg.de/index.php/s/wEgdccTzvNZTU9b/download" (mouse MPP1 differential gene expression results, tsv format); "https://owncloud.gwdg.de/index.php/s/zXhk3mrbcwyRfuE/download" (mouse MPP4 differential gene expression results, tsv format),
+*  Figure 7C: "https://owncloud.gwdg.de/index.php/s/sO9gPebqq1jPhcu/download" (mouse HSC de novo DMRs, txt format)
+
+
+```{r libs, echo=TRUE}
+suppressPackageStartupMessages({
+library(data.table,quietly=TRUE)
+library(dplyr,quietly=TRUE)
+library(reshape2,quietly=TRUE)
+library(ggplot2,quietly=TRUE)
+library(magrittr,quietly=TRUE)
+library(limma,quietly=TRUE)
+library(car,quietly=TRUE)
+library(curl,quietly=TRUE)
+library(biomaRt,quietly=TRUE)
+library(gridExtra,quietly=TRUE)
+library(cowplot,quietly=TRUE)
+library(VennDiagram,quietly=TRUE)
+library(Gviz,quietly=TRUE)
+library(GenomicRanges,quietly=TRUE)
+library(RColorBrewer,quietly=TRUE)
+library(biomaRt,quietly=TRUE)
+})
+
+```
+
+<hr color="blue" >
+<h4 style="color:blue">Figure 1B: Methylation ratios per target region in zebrafish.</h4>   
+<hr color="blue" >
+
+Methylation status of several genomic regions in zebrafish has been documented by Potok et al. 2013. We ask whether these regions are differentially methylated between dnmt1 wildtype and mutant fish (whole embryo).   
+
+Load single CpG methylation values from target intervals:
+
+```{r zf_download1, echo=TRUE}
+con <- curl('https://owncloud.gwdg.de/index.php/s/lvecKi4NY4DlUTX/download',open='rb')
+load(con)
+close(con)
+
+dim(limdat.LG.inCGI)
+head(limdat.LG.inCGI)
+```
+
+
+CpG positions are stored in the "ms" string, "NAf" equals 1 where more than 1 NA was found per row of the methylation matrix (i.e. more than 1 sample had missing values) and "CGI.ind" is the index of the target interval in the bed file.
+
+The number of CpGs with more than 1 missing value in the sample set are counted:
+
+```{r zf_countNA, echo=TRUE}
+limdat.LG.inCGI$NA.inCGI<-with(limdat.LG.inCGI,ave(NAf,factor(CGI.ind),FUN=sum))
+head(limdat.LG.inCGI)
+```
+
+Load the bed file with annotated intervals:
+
+```{r download2, echo=TRUE}
+con <- curl('https://owncloud.gwdg.de/index.php/s/vaFsvbCidrST2kO/download',open='r')
+CGI.bed<-read.table(con,sep="\t",header=FALSE,quote="",as.is=TRUE)
+close(con)
+
+dim(CGI.bed)
+```
+
+Annotate bed file with gene symbols from Potok et al.:
+
+```{r add_gene_symbol, echo=TRUE}
+colnames(CGI.bed)<-c("CHROM","START","END","Index")
+CGI.bed$GeneSymbol<-c("Vasa","cpn1","zgc101640","dnmt6","Ntla","dazl","pou5f1","krt8","dnmt3","rarga","hoxb3a","hoxb1a","zgc92231","krt4","irx3a")
+head(CGI.bed)
+```
+
+For each target interval, add information on number of CpGs with missing values and total number of CpGs:
+
+```{r count_CpGs, echo=TRUE}
+## number of CpGs with missing values
+CGI.bed$N.CG.NA<-limdat.LG.inCGI$NA.inCGI[match(CGI.bed$Index,limdat.LG.inCGI$CGI.ind)]
+
+## total number of CpGs per interval
+N.CG.tot<-with(limdat.LG.inCGI,ave(NAf,CGI.ind,FUN=length))
+CGI.bed$N.CG.tot<-N.CG.tot[match(CGI.bed$Index,limdat.LG.inCGI$CGI.ind)] 
+
+head(CGI.bed)
+```
+
+Set a filtering vector for intervals with more than 80% of total CpGs having missing values:
+
+```{r filtering_v, echo=TRUE}
+CGI.nadat<-ifelse(CGI.bed$N.CG.NA>(0.8*CGI.bed$N.CG.tot),NA,1)
+CGI.bed$CGI.NAf<-CGI.nadat
+CGI.bed.CC<-CGI.bed[complete.cases(CGI.bed),]
+CGI.bed.CC
+```
+
+To produce data underlying Figure 1B, single CpG methylation values are aggregated per target interval for every sample:
+
+```{r, echo=TRUE}
+CGI.limdat<-as.data.frame(apply(limdat.LG.inCGI[,2:7,with=FALSE],2,function(X){ave(X,factor(limdat.LG.inCGI$CGI.ind),FUN=function(X)mean(X,na.rm=TRUE))}),stringsAsFactors=FALSE) ## mean as aggregating function
+rownames(CGI.limdat)<-limdat.LG.inCGI$ms
+
+CGI.limdat$CGI.ind<-limdat.LG.inCGI$CGI.ind
+CGI.limdat<-unique(CGI.limdat)
+CGI.limdat<-CGI.limdat[order(CGI.limdat$CGI.ind),]
+rownames(CGI.limdat)<-CGI.limdat$CGI.ind
+CGI.limdat<-CGI.limdat[,-grep("CGI.ind",colnames(CGI.limdat))]
+dim(CGI.limdat)
+CGI.limdat
+```
+
+Filter out intervals using the filtering vector from above:
+
+```{r CGI_filt, echo=TRUE}
+CGI.limdat.CC<-CGI.limdat[!is.na(CGI.nadat),]
+dim(CGI.limdat.CC)
+```
+
+Prepare data for plotting:
+
+```{r Figure1B, echo=TRUE,fig.cap="Figure 1B. Interval mean methylation ratio in zebrafish data.",fig.height=6,fig.width=12}
+CGI.limdat.CC$Index<-rownames(CGI.limdat.CC) 
+plotdat<-melt(CGI.limdat.CC,value.name="BetaMean",variable.name="SampleID",id.vars="Index")
+head(plotdat)
+
+plotdat$GeneSymbol<-CGI.bed$GeneSymbol[match(plotdat$Index,CGI.bed$Index)]
+## subset for the 8 gene symbols matching the medaka target intervals
+plotdat<-plotdat[plotdat$GeneSymbol %in% c("cpn1","zgc101640","Ntla","krt8","pou5f1","rarga","krt4","irx3a"),]
+plotdat$Group<-NA
+plotdat$Group[grep("WT",plotdat$SampleID)]<-"dnmt1+/+"
+plotdat$Group[grep("MT",plotdat$SampleID)]<-"dnmt1m/m"
+plotdat$Group<-factor(plotdat$Group,levels=c("dnmt1+/+","dnmt1m/m"))
+plotdat$GeneSymbol<-factor(plotdat$GeneSymbol,levels=c("krt4","krt8","zgc101640","cpn1","rarga","irx3a","pou5f1","Ntla"))
+
+ggplot(data=plotdat,aes(x=Group,y=BetaMean))+geom_point(aes(colour=Group),position=position_jitter(width=0.5,height=0.0001,seed=124),size=4,alpha=0.6)+facet_grid(.~GeneSymbol)+ggtitle("Mean methylation rate per region")+
+    theme(text = element_text(size=14),axis.text.y = element_text(size=11),axis.text.x=element_blank(),axis.title = element_text(size=14))+xlab("")+ylab("Mean methylation rate")+ylim(0,1)+scale_colour_manual(values=c("blue","red"))
+
+```
+
+Significance testing for differential methylation in the zebrafish dataset:
+
+```{r pval, echo=TRUE}
+## logit transform the interval means
+plotdat$logit25<-logit(p=plotdat$BetaMean,percents=FALSE,adjust=0.025)
+
+GSv<-unique(as.character(plotdat$GeneSymbol))
+res<-data.frame(GSv,stringsAsFactors=FALSE)
+res$MT<-NA
+res$WT<-NA
+res$logitMT<-NA
+res$logitWT<-NA
+res$pval<-NA
+
+for(i in seq_along(GSv)){
+td<-plotdat[plotdat$GeneSymbol %in% GSv[i],]
+
+res$MT[i]<-mean(td$BetaMean[td$Group %in% "dnmt1m/m"])
+res$WT[i]<-mean(td$BetaMean[td$Group %in% "dnmt1+/+"])
+res$logitMT[i]<-mean(td$logit25[td$Group %in% "dnmt1m/m"])
+res$logitWT[i]<-mean(td$logit25[td$Group %in% "dnmt1+/+"])
+
+z<-t.test(x=td$logit25[td$Group %in% "dnmt1m/m"],y=td$logit25[td$Group %in% "dnmt1+/+"],var.equal=TRUE)
+res$pval[i]<-z$p.value
+
+}
+
+res<-res[order(res$pval),]
+res
+
+```
+Several of the inspected intervals are differentially methylated (hypomethylated) in dnmt1 mutant zebrafish.    
+
+<hr color="blue" >
+<h4 style="color:blue">Figure 1C: Methylation ratios per target region in medaka.</h4>   
+<hr color="blue" >
+
+We ask whether methylation status of homologous genomic intervals is affected in medaka dnmt1 mutants.   
+The same procedure is applied as for zebrafish data. Objects are overwritten.
+
+Load single CpG methylation values from target intervals:
+
+```{r med_download1, echo=TRUE}
+con <- curl('https://owncloud.gwdg.de/index.php/s/uqSNUHxH1PIwJZn/download',open='rb')
+load(con)
+close(con)
+
+dim(limdat.LG.inCGI)
+head(limdat.LG.inCGI)
+```
+
+CpG positions are stored in the "ms" string, "NAf" equals 1 where more than 1 NA was found per row of the methylation matrix (i.e. more than 1 sample had missing values) and "CGI.ind" is the index of the target interval in the bed file.
+
+The number of CpGs with more than 1 missing value in the sample set are counted:
+
+```{r med_countNA, echo=TRUE}
+limdat.LG.inCGI$NA.inCGI<-with(limdat.LG.inCGI,ave(NAf,factor(CGI.ind),FUN=sum))
+head(limdat.LG.inCGI)
+```
+
+Load the bed file with annotated intervals:
+
+```{r med_download2, echo=TRUE}
+con <- curl('https://owncloud.gwdg.de/index.php/s/IBcLPYo46QiZGzm/download',open='r')
+CGI.bed<-read.table(con,sep="\t",header=FALSE,quote="",as.is=TRUE)
+close(con)
+
+dim(CGI.bed)
+```
+
+
+Annotate bed file with gene symbols from Potok et al.:
+
+```{r, echo=TRUE}
+colnames(CGI.bed)<-c("CHROM","START","END","Index")
+CGI.bed$GeneSymbol<-c("Ntla","pou5f1","zgc101640","cpn1","irx3a","krt4","krt8","rarga")
+```
+
+For each target interval, add information on number of CpGs with missing values and total number of CpGs:
+
+```{r, echo=TRUE}
+## number of CpGs with missing values
+CGI.bed$N.CG.NA<-limdat.LG.inCGI$NA.inCGI[match(CGI.bed$Index,limdat.LG.inCGI$CGI.ind)]
+
+## total number of CpGs per interval
+N.CG.tot<-with(limdat.LG.inCGI,ave(NAf,CGI.ind,FUN=length))
+CGI.bed$N.CG.tot<-N.CG.tot[match(CGI.bed$Index,limdat.LG.inCGI$CGI.ind)] 
+
+```
+
+Set a filtering vector for intervals with more than 80% of total CpGs having missing values:
+
+```{r, echo=TRUE}
+CGI.nadat<-ifelse(CGI.bed$N.CG.NA>(0.8*CGI.bed$N.CG.tot),NA,1)
+CGI.bed$CGI.NAf<-CGI.nadat
+CGI.bed.CC<-CGI.bed[complete.cases(CGI.bed),]
+## CGI.bed
+CGI.bed.CC
+
+```
+
+In the medaka dataset, the high coverage from aplicon sequencing allows for retaining all considered intervals.
+To produce data underlying Figure 1C, single CpG methylation values are aggregated per target interval for every sample:
+
+```{r, echo=TRUE}
+CGI.limdat<-as.data.frame(apply(limdat.LG.inCGI[,2:7,with=FALSE],2,function(X){ave(X,factor(limdat.LG.inCGI$CGI.ind),FUN=function(X)mean(X,na.rm=TRUE))}),stringsAsFactors=FALSE) ## mean as aggregating function
+rownames(CGI.limdat)<-limdat.LG.inCGI$ms
+
+CGI.limdat$CGI.ind<-limdat.LG.inCGI$CGI.ind
+CGI.limdat<-unique(CGI.limdat)
+CGI.limdat<-CGI.limdat[order(CGI.limdat$CGI.ind),]
+rownames(CGI.limdat)<-CGI.limdat$CGI.ind
+CGI.limdat<-CGI.limdat[,-grep("CGI.ind",colnames(CGI.limdat))]
+CGI.limdat
+
+```
+Filter out intervals using the filtering vector from above:
+```{r, echo=TRUE}
+CGI.limdat.CC<-CGI.limdat[!is.na(CGI.nadat),]
+
+```
+
+Prepare data for plotting:
+
+```{r Figure1C, echo=TRUE,fig.cap="Figure 1C. Interval mean methylation ratio in medaka data.",fig.height=6,fig.width=12}
+
+CGI.limdat.CC$Index<-rownames(CGI.limdat.CC) 
+plotdat<-melt(CGI.limdat.CC,value.name="BetaMean",variable.name="SampleID",id.vars="Index")
+head(plotdat)
+
+plotdat$GeneSymbol<-CGI.bed$GeneSymbol[match(plotdat$Index,CGI.bed$Index)]
+## subset for the 8 gene symbols matching the medaka target intervals
+plotdat<-plotdat[plotdat$GeneSymbol %in% c("cpn1","zgc101640","Ntla","krt8","pou5f1","rarga","krt4","irx3a"),]
+plotdat$Group<-NA
+plotdat$Group[grep("WT",plotdat$SampleID)]<-"dnmt1+/+"
+plotdat$Group[grep("Mut",plotdat$SampleID)]<-"dnmt1m/m"
+plotdat$Group<-factor(plotdat$Group,levels=c("dnmt1+/+","dnmt1m/m"))
+plotdat$GeneSymbol<-factor(plotdat$GeneSymbol,levels=c("krt4","krt8","zgc101640","cpn1","rarga","irx3a","pou5f1","Ntla"))
+
+ggplot(data=plotdat,aes(x=Group,y=BetaMean))+geom_point(aes(colour=Group),position=position_jitter(width=0.5,height=0.0001,seed=123),size=4,alpha=0.6)+facet_grid(.~GeneSymbol)+ggtitle("Mean methylation rate per region")+
+    theme(text = element_text(size=14),axis.text.y = element_text(size=11),axis.text.x=element_blank(),axis.title = element_text(size=14))+xlab("")+ylab("Mean methylation rate")+ylim(0,1)+scale_colour_manual(values=c("blue","red"))
+
+```
+
+Significance testing for differential methylation in the medaka dataset:
+
+```{r med_pval, echo=TRUE}
+## logit transform the interval means
+plotdat$logit25<-logit(p=plotdat$BetaMean,percents=FALSE,adjust=0.025)
+
+GSv<-unique(as.character(plotdat$GeneSymbol))
+res<-data.frame(GSv,stringsAsFactors=FALSE)
+res$MT<-NA
+res$WT<-NA
+res$logitMT<-NA
+res$logitWT<-NA
+res$pval<-NA
+
+for(i in seq_along(GSv)){
+td<-plotdat[plotdat$GeneSymbol %in% GSv[i],]
+
+res$MT[i]<-mean(td$BetaMean[td$Group %in% "dnmt1m/m"])
+res$WT[i]<-mean(td$BetaMean[td$Group %in% "dnmt1+/+"])
+res$logitMT[i]<-mean(td$logit25[td$Group %in% "dnmt1m/m"])
+res$logitWT[i]<-mean(td$logit25[td$Group %in% "dnmt1+/+"])
+
+z<-t.test(x=td$logit25[td$Group %in% "dnmt1m/m"],y=td$logit25[td$Group %in% "dnmt1+/+"],var.equal=TRUE)
+res$pval[i]<-z$p.value
+
+}
+
+res<-res[order(res$pval),]
+res
+```
+
+Several of the inspected intervals are differentially methylated (hypomethylated) in dnmt1 mutant medaka.   
+
+<hr color="blue" >
+<h4 style="color:blue">Figure 7A: Methylation ratios per target region in mouse HSCs.</h4>   
+<hr color="blue" >
+
+Load the mouse HSC DMR methylation matrix containing DMRs filtered for at least 20% CpGs covered with at least 10x and not intersecting SNPs:
+
+```{r F7A_get_data, echo=TRUE}
+con <- curl('https://owncloud.gwdg.de/index.php/s/rablpH3ijlfw90d/download',open='rb')
+load(con)
+close(con)
+
+dim(CGI.limdat.CC)
+sum(is.na(CGI.limdat.CC))
+head(CGI.limdat.CC)
+```
+
+The data frame is already filtered such that only intervals with support from all replicates are retained.
+
+We would like to profile distributions of DMR methylation ratios in groups of dnmt1 wildtype and mutant mouse HSC. We compute group mean methylation ratios per DMR interval:
+
+```{r F7A_calc_means, echo=TRUE}
+CGI.limdat.CC.Means<-data.frame(rowMeans(CGI.limdat.CC[,grep("Mut",colnames(CGI.limdat.CC))]))
+colnames(CGI.limdat.CC.Means)<-"Mut"
+CGI.limdat.CC.Means$Wt<-rowMeans(CGI.limdat.CC[,grep("WT",colnames(CGI.limdat.CC))])
+
+rownames(CGI.limdat.CC.Means)<-CGI.limdat.CC$IntID
+head(CGI.limdat.CC.Means)
+
+```
+
+Transform data to long table format with reshape2 and generate the violin plot with ggplot2:
+ 
+```{r, echo=TRUE,fig.cap="Figure 7A. Violin plot of mean DMR methylation ratio in mouse HSC.",fig.height=5,fig.width=5}
+CGI.limdat.CC.MeansL<-melt(CGI.limdat.CC.Means,variable.name="Group",value.name="Beta.Mean")
+CGI.limdat.CC.MeansL$Group<-as.character(CGI.limdat.CC.MeansL$Group)
+CGI.limdat.CC.MeansL$Group[CGI.limdat.CC.MeansL$Group %in% "Mut"]<-"Dnmt1m/m"
+CGI.limdat.CC.MeansL$Group[CGI.limdat.CC.MeansL$Group %in% "Wt"]<-"Dnmt1+/+"
+CGI.limdat.CC.MeansL$Group<-factor(CGI.limdat.CC.MeansL$Group,levels=c("Dnmt1+/+","Dnmt1m/m"))
+
+ggplot(data=CGI.limdat.CC.MeansL)+geom_violin(aes(x=Group,y=Beta.Mean,fill=Group))+geom_boxplot(aes(x=Group,y=Beta.Mean),width=0.1)+ggtitle("DMRs")+
+theme(text = element_text(size=16),axis.text = element_text(size=12),axis.title = element_text(size=14),axis.text.x = element_text(angle = 90, hjust = 1))+ylab("Mean methylation ratio")+scale_fill_manual(values=c("grey28","red","darkblue","darkgreen"))
+``` 
+
+DMRs in Dnmt1 mutant mouse HSCs are partially demethylated.   
+
+<hr color="blue" >
+<h4 style="color:blue">Figure 7B: Log2 fold changes of Fos and Fosb expression in different progenitor populations of Dnmt1 mutant mice.</h4>   
+<hr color="blue" >
+
+Load results of differential gene expression from three stem cell and progenitor populations. Select results for genes Fos and Fosb.
+
+```{r F7B_get_data, echo=TRUE}
+cl<-list("https://owncloud.gwdg.de/index.php/s/n4oOMZ5Xep6C6Vv/download","https://owncloud.gwdg.de/index.php/s/wEgdccTzvNZTU9b/download","https://owncloud.gwdg.de/index.php/s/zXhk3mrbcwyRfuE/download")
+names(cl)<-c("HSC","MPP1","MPP4")
+dfl<-vector("list",3)
+for(i in seq_along(cl)){
+    con <- curl(cl[[i]],open='r')
+    ti<-read.table(con,header=TRUE,sep="\t",as.is=TRUE,quote="")
+    close(con)
+    assign(names(cl)[i],ti)
+    print(dim(ti))
+    ti$CellPopulation<-names(cl)[i]
+    colnames(ti)[1]<-"Gene"
+    dfl[[i]]<-ti
+    
+}
+
+plotdat<-do.call(rbind,dfl)
+plotdat<-subset(plotdat,Gene %in% c("Fos__chr12","Fosb__chr7"),select=c("Gene","log2FoldChange","lfcSE","CellPopulation"))
+plotdat$Gene<-gsub("__chr.+","",plotdat$Gene)
+plotdat
+
+
+```
+
+```{r,echo=TRUE,fig.cap="Figure 7B. Fold change in Fos and FosB gene expression in Dnmt1m/m progenitor cells.",fig.height=5,fig.width=5}
+plotdat$Gene<-factor(plotdat$Gene,levels=c("Fos","Fosb"))
+plotdat$CellPopulation<-factor(plotdat$CellPopulation,levels=c("HSC","MPP1","MPP4"))
+ggplot(plotdat)+geom_bar(aes(x=Gene,group=CellPopulation,y=log2FoldChange,fill=CellPopulation),stat="identity",position="dodge2")+ geom_errorbar(aes(x=Gene,group=CellPopulation,ymin=log2FoldChange-lfcSE, ymax=log2FoldChange+lfcSE),width = 0.2,position = position_dodge(width =0.9))
+
+```
+
+<hr color="blue" >
+<h4 style="color:blue">Figure 7C: Methylation changes in Fos and Fosb DMRs in Dnmt1m/m mouse HSC.</h4>   
+<hr color="blue" >
+
+Load results of differentially methylated region analysis for mouse HSC. Select results for genes Fos and Fosb.
+
+```{r F7C_get_data, echo=TRUE}
+con<-curl("https://owncloud.gwdg.de/index.php/s/sO9gPebqq1jPhcu/download",open='r')
+HSC.DMRs<-read.table(con,header=TRUE,sep="\t",as.is=TRUE,quote="")
+close(con)
+HSC.DMRs$IntID<-with(HSC.DMRs,paste0(Chromosome,"_",Start,"_",End))
+
+plotdat<-subset(HSC.DMRs,GeneSymbol %in% c("Fos","Fosb"),select=c("GeneSymbol","IntID","MeanA","MeanB"))
+colnames(plotdat)[3:4]<-c("Mut","Wt")
+
+plotdat
+```
+
+Reshape and plot data:
+
+```{r,echo=TRUE,fig.cap="Figure 7C. Fos and Fosb DMR methylation status in Dnmt1 wildtype and mutant mouse HSC.",fig.height=5,fig.width=5}
+plotdatl<-reshape2::melt(plotdat,id.vars=c("GeneSymbol","IntID"),value.name="MethylationRatio",variable.name="Genotype")
+plotdatl$Genotype<-as.character(plotdatl$Genotype)
+plotdatl$Genotype[plotdatl$Genotype %in%"Wt"]<-"Dnmt1+/+"
+plotdatl$Genotype[plotdatl$Genotype %in%"Mut"]<-"Dnmt1m/m"
+head(plotdatl)
+
+plotdatl$Genotype<-factor(plotdatl$Genotype,levels=c("Dnmt1+/+","Dnmt1m/m"))
+plotdatl$GeneSymbol<-factor(plotdatl$GeneSymbol,levels=c("Fos","Fosb"))
+
+ggplot(plotdatl)+geom_line(aes(x=Genotype,y=MethylationRatio,group=IntID))+geom_point(aes(x=Genotype,y=MethylationRatio),size=2)+ylim(0,1)+facet_wrap(~GeneSymbol)
+
+```
+
+
+<hr color="blue" >
+<h4 style="color:blue">Session Info</h4>   
+<hr color="blue" >
+
+The R locale setup used in preparing this vignette:
+
+```{r sessionInfo, echo=TRUE}
+sessionInfo()
+```
+
